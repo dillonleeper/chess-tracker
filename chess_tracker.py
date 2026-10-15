@@ -107,12 +107,28 @@ def parse_pgn_date(pgn_string):
     return None
 
 
-def extract_first_move(pgn_string):
-    """Extract white's first move (e.g., '1.c4', '1.e4', '1.d4') from PGN."""
-    # Look for the first move in the moves section
-    moves_match = re.search(r"1\.(\S+)", pgn_string)
-    if moves_match:
-        return f"1.{moves_match.group(1)}"
+def extract_moves_from_pgn(pgn_string):
+    """Extract the moves section from PGN and return as a list of moves."""
+    # PGN moves are in the last part after all the metadata
+    # Find the position after the last ] which marks end of headers
+    last_bracket = pgn_string.rfind("]")
+    if last_bracket == -1:
+        return []
+
+    moves_section = pgn_string[last_bracket + 1:].strip()
+    # Remove result (1-0, 0-1, 1/2-1/2, *)
+    moves_section = re.sub(r'\s+[01]-[01]|\s+1/2-1/2|\s+\*\s*$', '', moves_section)
+    # Split on whitespace, filter out empty and numbers like "1." "2." etc
+    tokens = moves_section.split()
+    moves = [t for t in tokens if t and not re.match(r'^\d+\.+$', t)]
+    return moves
+
+
+def extract_first_move(pgn_string, is_white=True):
+    """Extract white's first move from PGN."""
+    moves = extract_moves_from_pgn(pgn_string)
+    if moves:
+        return moves[0]
     return None
 
 
@@ -120,9 +136,16 @@ def extract_defense_vs_qgd(pgn_string, is_black):
     """Check if Black played ...e6 in response to QGD (1.d4 d5 2.c4 e6)."""
     if not is_black:
         return False
-    # Very simple heuristic: look for "d4" and "d5" and "e6" in early moves
-    if "1.d4" in pgn_string and "1...d5" in pgn_string and "e6" in pgn_string:
-        return True
+    moves = extract_moves_from_pgn(pgn_string)
+    # Looking for: 1.d4 d5 2.c4 e6 pattern
+    # moves[0]=d4, moves[1]=d5, moves[2]=c4, moves[3]=e6
+    if len(moves) >= 4:
+        m0 = moves[0].replace('+', '').replace('#', '')
+        m1 = moves[1].replace('+', '').replace('#', '')
+        m2 = moves[2].replace('+', '').replace('#', '')
+        m3 = moves[3].replace('+', '').replace('#', '')
+        if m0 == 'd4' and m1 == 'd5' and m2 == 'c4' and m3 == 'e6':
+            return True
     return False
 
 
@@ -130,8 +153,16 @@ def extract_philidor(pgn_string, is_black):
     """Check if Black played the Philidor Defense (1.e4 e5 2.Nf3 d6)."""
     if not is_black:
         return False
-    if "1.e4" in pgn_string and "e5" in pgn_string and "d6" in pgn_string:
-        return True
+    moves = extract_moves_from_pgn(pgn_string)
+    # Looking for: 1.e4 e5 2.Nf3 d6
+    # moves[0]=e4, moves[1]=e5, moves[2]=Nf3, moves[3]=d6
+    if len(moves) >= 4:
+        m0 = moves[0].replace('+', '').replace('#', '')
+        m1 = moves[1].replace('+', '').replace('#', '')
+        m2 = moves[2].replace('+', '').replace('#', '')
+        m3 = moves[3].replace('+', '').replace('#', '')
+        if m0 == 'e4' and m1 == 'e5' and m2 == 'Nf3' and m3 == 'd6':
+            return True
     return False
 
 
@@ -260,10 +291,14 @@ def compute_metrics(games, player_rating):
 
 
 def analyze_habits(games):
-    """Track habits: 1.c4, Philidor, ...e6 vs QGD, late-night, abandons."""
+    """Track habits: openings, Philidor, ...e6 vs QGD, late-night, abandons."""
     habits = {
-        "english_openings": 0,  # 1.c4
-        "english_wins": 0,
+        "c4": 0,  # 1.c4
+        "c4_wins": 0,
+        "e4": 0,  # 1.e4
+        "e4_wins": 0,
+        "d4": 0,  # 1.d4
+        "d4_wins": 0,
         "philidor": 0,
         "qgd_e6": 0,
         "late_night_games": 0,  # 10pm+ ET
@@ -281,13 +316,22 @@ def analyze_habits(games):
         black = game.get("black", {})
         is_player_white = white.get("username") == USERNAME
 
-        # First move check (white opening)
+        # White openings
         if is_player_white:
             first_move = extract_first_move(pgn)
-            if first_move == "1.c4":
-                habits["english_openings"] += 1
-                if "1-0" in pgn:
-                    habits["english_wins"] += 1
+            is_win = "1-0" in pgn
+            if first_move == "c4":
+                habits["c4"] += 1
+                if is_win:
+                    habits["c4_wins"] += 1
+            elif first_move == "e4":
+                habits["e4"] += 1
+                if is_win:
+                    habits["e4_wins"] += 1
+            elif first_move == "d4":
+                habits["d4"] += 1
+                if is_win:
+                    habits["d4_wins"] += 1
 
         # Philidor (black)
         if not is_player_white and extract_philidor(pgn, True):
@@ -303,8 +347,7 @@ def analyze_habits(games):
             dt_et = dt.astimezone(et)
             if dt_et.hour >= 22:  # 10pm or later
                 habits["late_night_games"] += 1
-                result = game.get("pgn", "")
-                is_win = ("1-0" in result if is_player_white else "0-1" in result)
+                is_win = ("1-0" in pgn if is_player_white else "0-1" in pgn)
                 if is_win:
                     habits["late_night_wins"] += 1
 
@@ -375,7 +418,7 @@ def generate_html(rapid_games, daily_games, blitz_games, player_rating):
                 </div>
             </div>
             <div class="habits-list">
-                <div><strong>1.c4:</strong> {rapid_habits['english_openings']} games, {rapid_habits['english_wins']} wins</div>
+                <div><strong>Openings as White:</strong> 1.c4 {rapid_habits['c4']}W-{rapid_habits['c4_wins']}, 1.e4 {rapid_habits['e4']}W-{rapid_habits['e4_wins']}, 1.d4 {rapid_habits['d4']}W-{rapid_habits['d4_wins']}</div>
                 <div><strong>Late-night (10pm+):</strong> {rapid_habits['late_night_games']} games, {rapid_habits['late_night_wins']} wins</div>
                 <div><strong>Abandons:</strong> {rapid_habits['abandons']}</div>
             </div>
@@ -398,7 +441,7 @@ def generate_html(rapid_games, daily_games, blitz_games, player_rating):
                 </div>
             </div>
             <div class="habits-list">
-                <div><strong>...e6 vs QGD:</strong> {daily_habits['qgd_e6']} games</div>
+                <div><strong>As Black:</strong> Philidor {daily_habits['philidor']} games, ...e6 vs QGD {daily_habits['qgd_e6']} games</div>
                 <div><strong>Abandons:</strong> {daily_habits['abandons']}</div>
             </div>
         </div>
